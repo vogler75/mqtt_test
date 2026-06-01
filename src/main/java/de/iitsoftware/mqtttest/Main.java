@@ -152,7 +152,8 @@ public class Main {
         stats.printParallelSummary(config.count);
 
         long lost = Math.max(0, config.count - stats.receivedMessages());
-        return new Result("parallel", config.qos, -1, -1, recvMsgRate, recvMbRate, lost);
+        return new Result("parallel", config.qos, -1, -1, recvMsgRate, recvMbRate,
+                lost, stats.outOfOrder());
     }
 
     /** Send all messages with the consumer offline, then reconnect and drain the broker queue. */
@@ -203,7 +204,8 @@ public class Main {
         // Clear the durable session from the broker so it doesn't linger between matrix runs.
         clearDurableSession(subscriber, config, maxInflight);
 
-        return new Result("send-drain", config.qos, sendMsgRate, sendMbRate, recvMsgRate, recvMbRate, lost);
+        return new Result("send-drain", config.qos, sendMsgRate, sendMbRate, recvMsgRate, recvMbRate,
+                lost, stats.outOfOrder());
     }
 
     /** Reconnect with a clean session and disconnect, telling the broker to discard the durable session. */
@@ -270,25 +272,27 @@ public class Main {
 
     private void printTable(List<Result> results, Config config) {
         System.out.println();
-        System.out.println("=================================== Throughput summary ===================================");
+        System.out.println("======================================== Throughput summary ========================================");
         System.out.printf("  Broker: %s   payload: %d B   messages: %,d per run%n",
                 config.broker, config.size, config.count);
-        System.out.println("-----------------------------------------------------------------------------------------");
-        System.out.printf("  %-11s %4s %15s %12s %15s %12s %9s%n",
-                "Mode", "QoS", "Send msg/s", "Send MB/s", "Recv msg/s", "Recv MB/s", "Lost");
-        System.out.println("  ---------------------------------------------------------------------------------------");
+        System.out.println("---------------------------------------------------------------------------------------------------");
+        System.out.printf("  %-11s %4s %15s %12s %15s %12s %9s %10s%n",
+                "Mode", "QoS", "Send msg/s", "Send MB/s", "Recv msg/s", "Recv MB/s", "Lost", "In-seq");
+        System.out.println("  -------------------------------------------------------------------------------------------------");
         for (Result r : results) {
             String sendMsg = r.sendMsgRate() < 0 ? "-" : String.format("%,.0f", r.sendMsgRate());
             String sendMb = r.sendMbRate() < 0 ? "-" : String.format("%.1f", r.sendMbRate());
-            System.out.printf("  %-11s %4d %15s %12s %15s %12s %9d%n",
+            String inSeq = r.outOfOrder() == 0 ? "yes" : "no(" + r.outOfOrder() + ")";
+            System.out.printf("  %-11s %4d %15s %12s %15s %12s %9d %10s%n",
                     r.mode(), r.qos(), sendMsg, sendMb,
                     String.format("%,.0f", r.recvMsgRate()),
                     String.format("%.1f", r.recvMbRate()),
-                    r.lost());
+                    r.lost(), inSeq);
         }
-        System.out.println("=========================================================================================");
+        System.out.println("===================================================================================================");
         System.out.println("  send-drain: Send = publish throughput (consumer offline); Recv = drain throughput.");
         System.out.println("  parallel  : Recv = end-to-end throughput (subscriber consuming during publish).");
+        System.out.println("  In-seq    : yes = every message arrived in ascending sequence; no(N) = N out-of-order arrivals.");
     }
 
     private static MqttCallback receiveCallback(Stats stats) {
@@ -301,8 +305,10 @@ public class Main {
             @Override
             public void messageArrived(String topic, MqttMessage message) {
                 byte[] payload = message.getPayload();
-                long sentNanos = ByteBuffer.wrap(payload, 8, 8).getLong();
-                stats.recordReceived(payload.length, System.nanoTime() - sentNanos);
+                ByteBuffer header = ByteBuffer.wrap(payload, 0, Config.HEADER_SIZE);
+                long seq = header.getLong();       // bytes 0..7
+                long sentNanos = header.getLong(); // bytes 8..15
+                stats.recordReceived(payload.length, seq, System.nanoTime() - sentNanos);
             }
 
             @Override

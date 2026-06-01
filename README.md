@@ -98,26 +98,31 @@ While running, a line is printed every `--interval` seconds, e.g.:
 - `window:` rate over the last interval. `total:` cumulative rate for the current phase.
 - The verb is `sent` during a send phase and `recv` during a receive/drain phase.
 
-Each run ends with a summary (duration, messages sent/received, lost count, throughput, and — for
-`parallel` — end-to-end latency). In `all` mode a final table is printed:
+Each run ends with a summary (duration, messages sent/received, lost count, throughput, in-sequence
+check, and — for `parallel` — end-to-end latency). In `all` mode a final table is printed:
 
 ```
-=================================== Throughput summary ===================================
+======================================== Throughput summary ========================================
   Broker: tcp://localhost:1883   payload: 256 B   messages: 200,000 per run
------------------------------------------------------------------------------------------
-  Mode         QoS      Send msg/s    Send MB/s      Recv msg/s    Recv MB/s      Lost
-  ---------------------------------------------------------------------------------------
-  send-drain     0         305,899         78.3          27,371          7.0         0
-  send-drain     1          41,596         10.6           3,637          0.9         0
-  send-drain     2          41,933         10.7             678          0.2         0
-  parallel       0               -            -         128,230         32.8         0
-  parallel       1               -            -           3,036          0.8         0
-  parallel       2               -            -             586          0.1         0
-=========================================================================================
+---------------------------------------------------------------------------------------------------
+  Mode         QoS      Send msg/s    Send MB/s      Recv msg/s    Recv MB/s      Lost     In-seq
+  -------------------------------------------------------------------------------------------------
+  send-drain     0         305,899         78.3          27,371          7.0         0        yes
+  send-drain     1          41,596         10.6           3,637          0.9         0        yes
+  send-drain     2          41,933         10.7             678          0.2         0        yes
+  parallel       0               -            -         128,230         32.8         0        yes
+  parallel       1               -            -           3,036          0.8         0        yes
+  parallel       2               -            -             586          0.1         0        yes
+===================================================================================================
 ```
 
 (Numbers above are illustrative — single publisher/subscriber, loopback to a SwiftMQ broker. They
 show per-connection ceilings and the relative cost of QoS, not a broker's aggregate capacity.)
+
+**In-seq** verifies ordering: each message carries a strictly increasing sequence number, and the
+subscriber flags any message that arrives with a lower sequence number than its predecessor.
+`yes` means every message arrived in ascending order; `no(N)` reports N out-of-order arrivals. Gaps
+caused by QoS 0 loss are not counted as reordering — they show up in the **Lost** column instead.
 
 ## How it works
 

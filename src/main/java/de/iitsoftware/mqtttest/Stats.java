@@ -26,6 +26,13 @@ public final class Stats {
     private final AtomicLong latencyMinNanos = new AtomicLong(Long.MAX_VALUE);
     private final AtomicLong latencyMaxNanos = new AtomicLong(Long.MIN_VALUE);
 
+    // In-order arrival check. Messages are published with strictly increasing sequence numbers, so a
+    // received sequence number lower than its predecessor's means the broker delivered out of order.
+    // Gaps (from QoS 0 loss) are not reordering and do not count. lastSeq is written only from the
+    // single Paho callback thread; outOfOrder is read by the reporter/summary threads.
+    private final AtomicLong outOfOrder = new AtomicLong();
+    private volatile long lastSeq = -1;
+
     // Active reporting phase.
     private volatile boolean trackSent;
     private long phaseStartNanos;
@@ -38,12 +45,21 @@ public final class Stats {
         sentBytes.addAndGet(bytes);
     }
 
-    public void recordReceived(int bytes, long latencyNanos) {
+    public void recordReceived(int bytes, long seq, long latencyNanos) {
+        if (seq < lastSeq) {
+            outOfOrder.incrementAndGet();
+        }
+        lastSeq = seq;
         receivedMessages.incrementAndGet();
         receivedBytes.addAndGet(bytes);
         latencySumNanos.addAndGet(latencyNanos);
         updateMin(latencyMinNanos, latencyNanos);
         updateMax(latencyMaxNanos, latencyNanos);
+    }
+
+    /** Number of messages that arrived with a lower sequence number than their predecessor. */
+    public long outOfOrder() {
+        return outOfOrder.get();
     }
 
     public long receivedMessages() {
@@ -146,6 +162,9 @@ public final class Stats {
                 lost, expected > 0 ? 100.0 * lost / expected : 0.0);
         System.out.printf("  Bytes recv     : %,d (%.2f MB)%n", rBytes, rBytes / 1e6);
         System.out.printf("  Recv rate      : %,.0f msg/s  |  %.2f MB/s%n", msgRate, mbRate);
+        long ooo = outOfOrder.get();
+        System.out.printf("  In sequence    : %s%n",
+                ooo == 0 ? "yes" : "NO (" + String.format("%,d", ooo) + " out of order)");
         if (latency && rMsgs > 0) {
             System.out.printf("  Latency (e2e)  : min %.3f ms  avg %.3f ms  max %.3f ms%n",
                     latencyMinNanos.get() / 1e6,
