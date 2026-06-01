@@ -1,6 +1,7 @@
 package de.iitsoftware.mqtttest;
 
 import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken;
+import org.eclipse.paho.client.mqttv3.IMqttToken;
 import org.eclipse.paho.client.mqttv3.MqttAsyncClient;
 import org.eclipse.paho.client.mqttv3.MqttCallback;
 import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
@@ -127,12 +128,17 @@ public class Main {
     private Result runParallel(Config config, MqttAsyncClient subscriber, MqttAsyncClient publisher,
                                Semaphore inflight, int maxInflight, Stats stats,
                                ScheduledExecutorService reporter) throws Exception {
-        System.out.println("Connecting...");
+        System.out.println("Connecting subscriber...");
         subscriber.connect(connectOptions(config, maxInflight, true)).waitForCompletion();
-        publisher.connect(connectOptions(config, maxInflight, true)).waitForCompletion();
+        System.out.println("Subscriber connected (CONNACK received).");
 
         System.out.println("Subscribing to '" + config.topic + "' at QoS " + config.qos + "...");
-        subscriber.subscribe(config.topic, config.qos).waitForCompletion();
+        subscribeAndWait(subscriber, config.topic, config.qos);
+        System.out.println("Subscription acknowledged (SUBACK received).");
+
+        System.out.println("Connecting publisher...");
+        publisher.connect(connectOptions(config, maxInflight, true)).waitForCompletion();
+        System.out.println("Publisher connected.");
 
         stats.beginPhase(false); // track received
         ScheduledFuture<?> ticker = scheduleReporter(reporter, stats, config);
@@ -168,7 +174,9 @@ public class Main {
         System.out.println("[send-drain] Establishing durable subscription on '" + config.topic
                 + "' at QoS " + config.qos + "...");
         subscriber.connect(connectOptions(config, maxInflight, false)).waitForCompletion();
-        subscriber.subscribe(config.topic, config.qos).waitForCompletion();
+        System.out.println("[send-drain] Subscriber connected (CONNACK received).");
+        subscribeAndWait(subscriber, config.topic, config.qos);
+        System.out.println("[send-drain] Durable subscription acknowledged (SUBACK received).");
         subscriber.disconnect().waitForCompletion();
 
         // --- Send phase ---
@@ -348,6 +356,16 @@ public class Main {
             options.setPassword(config.password.toCharArray());
         }
         return options;
+    }
+
+    private static void subscribeAndWait(MqttAsyncClient client, String topic, int qos) throws MqttException {
+        IMqttToken token = client.subscribe(topic, qos);
+        token.waitForCompletion();
+
+        int[] grantedQos = token.getGrantedQos();
+        if (grantedQos == null || grantedQos.length == 0 || grantedQos[0] == 0x80) {
+            throw new MqttException(MqttException.REASON_CODE_SUBSCRIBE_FAILED);
+        }
     }
 
     private static void disconnectAndClose(MqttAsyncClient client) {
