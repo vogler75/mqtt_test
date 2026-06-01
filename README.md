@@ -138,3 +138,7 @@ src/main/java/de/iitsoftware/mqtttest/
   Stats.java    thread-safe counters, per-phase reporter, summaries
   Result.java   one matrix row (throughput per mode/QoS)
 ```
+
+## License
+
+[MIT](LICENSE) © IIT Software GmbH
