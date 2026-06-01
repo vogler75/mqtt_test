@@ -35,6 +35,9 @@ java -jar target/mqtt_test-1.0-SNAPSHOT.jar
 # A single end-to-end run at QoS 1
 java -jar target/mqtt_test-1.0-SNAPSHOT.jar --mode parallel --qos 1 --count 100000
 
+# Throttle publishing: sleep 50 ms after every 10,000 published messages
+java -jar target/mqtt_test-1.0-SNAPSHOT.jar --mode send-drain --qos 1 --throttle-every 10000 --throttle-delay 50
+
 # Point at a remote broker
 java -jar target/mqtt_test-1.0-SNAPSHOT.jar --broker tcp://broker.example.com:1883
 ```
@@ -50,6 +53,9 @@ java -jar target/mqtt_test-1.0-SNAPSHOT.jar --broker tcp://broker.example.com:18
 | `--count` | N | `200000` | Number of messages |
 | `--interval` | seconds | `5` | Throughput report interval |
 | `--mode` | `parallel` \| `send-drain` \| `all` | `all` | Test mode (see below) |
+| `--throttle-every` | N | `0` | Sleep after every N published messages (`0` disables throttling) |
+| `--throttle-delay` | ms | `0` | Sleep duration in milliseconds |
+| `--receive-idle-timeout` | seconds | auto | Stop waiting after no receive progress; auto is 10 s for QoS 0 and 300 s for QoS 1/2 |
 | `--username` | user | — | Broker username (optional) |
 | `--password` | pass | — | Broker password (optional) |
 | `--client` | prefix | `mqtt-perf` | Client-id prefix |
@@ -132,7 +138,8 @@ caused by QoS 0 loss are not counted as reordering — they show up in the **Los
   pipelines without unbounded memory growth and applies natural backpressure.
 - The subscriber reads the payload header to count messages, detect loss, and compute latency.
 - A run completes when all N messages are received, or after an idle timeout following the last
-  message (which surfaces QoS 0 loss instead of hanging).
+  message. The automatic timeout is short for QoS 0 loss detection and longer for QoS 1/2, where a
+  slow tail should not be reported as loss too early. Override with `--receive-idle-timeout`.
 
 ## Project layout
 

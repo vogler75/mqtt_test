@@ -31,9 +31,13 @@ public final class Config {
     public final String username;   // may be null
     public final String password;   // may be null
     public final String clientPrefix;
+    public final long throttleEvery;
+    public final long throttleDelayMs;
+    public final int receiveIdleTimeoutSeconds;
 
     private Config(String broker, String topic, int qos, int size, long count,
-                   int intervalSeconds, Mode mode, String username, String password, String clientPrefix) {
+                   int intervalSeconds, Mode mode, String username, String password, String clientPrefix,
+                   long throttleEvery, long throttleDelayMs, int receiveIdleTimeoutSeconds) {
         this.broker = broker;
         this.topic = topic;
         this.qos = qos;
@@ -44,11 +48,15 @@ public final class Config {
         this.username = username;
         this.password = password;
         this.clientPrefix = clientPrefix;
+        this.throttleEvery = throttleEvery;
+        this.throttleDelayMs = throttleDelayMs;
+        this.receiveIdleTimeoutSeconds = receiveIdleTimeoutSeconds;
     }
 
     /** Create a copy with a different mode, QoS and topic (used by the {@code all} matrix runner). */
     public Config derive(Mode mode, int qos, String topic) {
-        return new Config(broker, topic, qos, size, count, intervalSeconds, mode, username, password, clientPrefix);
+        return new Config(broker, topic, qos, size, count, intervalSeconds, mode, username, password,
+                clientPrefix, throttleEvery, throttleDelayMs, receiveIdleTimeoutSeconds);
     }
 
     public static String usage() {
@@ -69,6 +77,10 @@ public final class Config {
                   --count     N      number of messages           (default 200000)
                   --interval  SECS   throughput report interval    (default 5)
                   --mode      MODE   parallel | send-drain | all  (default all)
+                  --throttle-every N sleep after every N published messages (default 0, disabled)
+                  --throttle-delay MS sleep duration in milliseconds       (default 0)
+                  --receive-idle-timeout SECS
+                                       stop waiting after no receive progress (default auto)
                   --username  USER   broker username              (optional)
                   --password  PASS   broker password              (optional)
                   --client    PREFIX client-id prefix             (default mqtt-perf)
@@ -101,6 +113,9 @@ public final class Config {
         String username = null;
         String password = null;
         String clientPrefix = "mqtt-perf";
+        long throttleEvery = 0;
+        long throttleDelayMs = 0;
+        int receiveIdleTimeoutSeconds = 0;
 
         for (int i = 0; i < args.length; i++) {
             String arg = args[i];
@@ -113,6 +128,9 @@ public final class Config {
                 case "--count"    -> count = parseLong(value(args, ++i, arg), arg);
                 case "--interval" -> interval = parseInt(value(args, ++i, arg), arg);
                 case "--mode"     -> mode = parseMode(value(args, ++i, arg));
+                case "--throttle-every" -> throttleEvery = parseLong(value(args, ++i, arg), arg);
+                case "--throttle-delay" -> throttleDelayMs = parseLong(value(args, ++i, arg), arg);
+                case "--receive-idle-timeout" -> receiveIdleTimeoutSeconds = parseInt(value(args, ++i, arg), arg);
                 case "--username" -> username = value(args, ++i, arg);
                 case "--password" -> password = value(args, ++i, arg);
                 case "--client"   -> clientPrefix = value(args, ++i, arg);
@@ -132,13 +150,28 @@ public final class Config {
         if (interval <= 0) {
             throw new IllegalArgumentException("--interval must be > 0 (got " + interval + ")");
         }
+        if (throttleEvery < 0) {
+            throw new IllegalArgumentException("--throttle-every must be >= 0 (got " + throttleEvery + ")");
+        }
+        if (throttleDelayMs < 0) {
+            throw new IllegalArgumentException("--throttle-delay must be >= 0 (got " + throttleDelayMs + ")");
+        }
+        if ((throttleEvery == 0) != (throttleDelayMs == 0)) {
+            throw new IllegalArgumentException("--throttle-every and --throttle-delay must both be > 0, "
+                    + "or both be 0 to disable throttling");
+        }
+        if (receiveIdleTimeoutSeconds < 0) {
+            throw new IllegalArgumentException("--receive-idle-timeout must be >= 0 (got "
+                    + receiveIdleTimeoutSeconds + ")");
+        }
         if (mode == Mode.SEND_DRAIN && qos == 0) {
             System.err.println("Warning: send-drain at QoS 0 relies on the broker storing QoS 0 messages "
                     + "for an offline durable session, which the MQTT spec does not require. "
                     + "Expect heavy loss unless the broker explicitly supports it.");
         }
 
-        return new Config(broker, topic, qos, size, count, interval, mode, username, password, clientPrefix);
+        return new Config(broker, topic, qos, size, count, interval, mode, username, password, clientPrefix,
+                throttleEvery, throttleDelayMs, receiveIdleTimeoutSeconds);
     }
 
     private static Mode parseMode(String v) {
@@ -179,6 +212,10 @@ public final class Config {
         return "broker=" + broker + ", topic=" + topic + ", qos=" + qos
                 + ", size=" + size + "B, count=" + count
                 + ", interval=" + intervalSeconds + "s"
+                + (throttleEvery > 0 ? ", throttleEvery=" + throttleEvery
+                        + ", throttleDelay=" + throttleDelayMs + "ms" : "")
+                + (receiveIdleTimeoutSeconds > 0 ? ", receiveIdleTimeout="
+                        + receiveIdleTimeoutSeconds + "s" : "")
                 + ", mode=" + switch (mode) {
                     case SEND_DRAIN -> "send-drain";
                     case PARALLEL -> "parallel";

@@ -17,6 +17,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * MQTT 3.1.1 throughput test client.
@@ -37,6 +38,9 @@ public class Main {
 
     /** Max in-flight publishes (bounds memory and provides backpressure for QoS 1/2). */
     private static final int MAX_INFLIGHT = 1000;
+    private static final long CONTROL_COMPLETION_TIMEOUT_MS = 30_000;
+    private static final long DISCONNECT_QUIESCE_TIMEOUT_MS = 1_000;
+    private static final long DISCONNECT_COMPLETION_TIMEOUT_MS = 5_000;
 
     public static void main(String[] args) throws Exception {
         Config config;
@@ -55,7 +59,15 @@ public class Main {
         }
 
         System.out.println("Config: " + config);
-        new Main().run(config);
+        int exitCode = 0;
+        try {
+            new Main().run(config);
+        } catch (Exception e) {
+            exitCode = 1;
+            e.printStackTrace(System.err);
+        } finally {
+            System.exit(exitCode);
+        }
     }
 
     private void run(Config config) throws Exception {
@@ -129,7 +141,7 @@ public class Main {
                                Semaphore inflight, int maxInflight, Stats stats,
                                ScheduledExecutorService reporter) throws Exception {
         System.out.println("Connecting subscriber...");
-        subscriber.connect(connectOptions(config, maxInflight, true)).waitForCompletion();
+        connectAndWait(subscriber, config, maxInflight, true, "parallel subscriber connect");
         System.out.println("Subscriber connected (CONNACK received).");
 
         System.out.println("Subscribing to '" + config.topic + "' at QoS " + config.qos + "...");
@@ -137,7 +149,7 @@ public class Main {
         System.out.println("Subscription acknowledged (SUBACK received).");
 
         System.out.println("Connecting publisher...");
-        publisher.connect(connectOptions(config, maxInflight, true)).waitForCompletion();
+        connectAndWait(publisher, config, maxInflight, true, "parallel publisher connect");
         System.out.println("Publisher connected.");
 
         stats.beginPhase(false); // track received
@@ -173,14 +185,16 @@ public class Main {
         // Establish a durable subscription, then go offline so the broker queues matching messages.
         System.out.println("[send-drain] Establishing durable subscription on '" + config.topic
                 + "' at QoS " + config.qos + "...");
-        subscriber.connect(connectOptions(config, maxInflight, false)).waitForCompletion();
+        connectAndWait(subscriber, config, maxInflight, false, "send-drain subscriber connect");
         System.out.println("[send-drain] Subscriber connected (CONNACK received).");
         subscribeAndWait(subscriber, config.topic, config.qos);
         System.out.println("[send-drain] Durable subscription acknowledged (SUBACK received).");
-        subscriber.disconnect().waitForCompletion();
+        System.out.println("[send-drain] Taking subscriber offline before publishing...");
+        forceOffline(subscriber);
+        System.out.println("[send-drain] Subscriber is offline; connecting publisher...");
 
         // --- Send phase ---
-        publisher.connect(connectOptions(config, maxInflight, true)).waitForCompletion();
+        connectAndWait(publisher, config, maxInflight, true, "send-drain publisher connect");
         System.out.println("[send-drain] Sending " + String.format("%,d", config.count)
                 + " messages of " + config.size + " bytes...");
         stats.beginPhase(true); // track sent
@@ -192,14 +206,14 @@ public class Main {
         double sendMsgRate = stats.phaseMsgRate();
         double sendMbRate = stats.phaseMbRate();
         stats.printSendSummary();
-        publisher.disconnect().waitForCompletion();
+        disconnectAndWait(publisher);
 
         // --- Drain phase ---
         System.out.println();
         System.out.println("[send-drain] Reconnecting consumer to drain queued messages...");
         stats.beginPhase(false); // track received
         ScheduledFuture<?> drainTicker = scheduleReporter(reporter, stats, config);
-        subscriber.connect(connectOptions(config, maxInflight, false)).waitForCompletion(); // resume session
+        connectAndWait(subscriber, config, maxInflight, false, "send-drain subscriber reconnect"); // resume session
         awaitReceive(config, stats);
         drainTicker.cancel(false);
         stats.report();
@@ -220,10 +234,10 @@ public class Main {
     private void clearDurableSession(MqttAsyncClient subscriber, Config config, int maxInflight) {
         try {
             if (subscriber.isConnected()) {
-                subscriber.disconnect().waitForCompletion(5_000);
+                disconnectAndWait(subscriber);
             }
-            subscriber.connect(connectOptions(config, maxInflight, true)).waitForCompletion(5_000);
-            subscriber.disconnect().waitForCompletion(5_000);
+            connectAndWait(subscriber, config, maxInflight, true, "clear durable session connect");
+            disconnectAndWait(subscriber);
         } catch (MqttException e) {
             // best-effort cleanup
         }
@@ -256,12 +270,17 @@ public class Main {
 
             publisher.publish(config.topic, message);
             stats.recordSent(payload.length);
+
+            long published = seq + 1;
+            if (config.throttleEvery > 0 && published < config.count && published % config.throttleEvery == 0) {
+                Thread.sleep(config.throttleDelayMs);
+            }
         }
     }
 
     /** Wait until all expected messages arrive, or until the receive side goes idle (covers QoS 0 loss). */
     private void awaitReceive(Config config, Stats stats) throws InterruptedException {
-        long idleTimeoutMs = Math.max(5_000L, config.intervalSeconds * 2_000L);
+        long idleTimeoutMs = receiveIdleTimeoutMs(config);
         long lastCount = -1;
         long lastProgress = System.currentTimeMillis();
 
@@ -272,10 +291,22 @@ public class Main {
                 lastCount = current;
                 lastProgress = System.currentTimeMillis();
             } else if (System.currentTimeMillis() - lastProgress > idleTimeoutMs) {
-                System.out.println("Receiver idle for " + idleTimeoutMs + " ms; assuming message loss.");
+                System.out.println("Receiver idle for " + idleTimeoutMs + " ms with "
+                        + String.format("%,d", config.count - current)
+                        + " messages still missing; assuming message loss.");
                 break;
             }
         }
+    }
+
+    private long receiveIdleTimeoutMs(Config config) {
+        if (config.receiveIdleTimeoutSeconds > 0) {
+            return config.receiveIdleTimeoutSeconds * 1_000L;
+        }
+        if (config.qos == 0) {
+            return Math.max(5_000L, config.intervalSeconds * 2_000L);
+        }
+        return Math.max(300_000L, config.intervalSeconds * 2_000L);
     }
 
     private void printTable(List<Result> results, Config config) {
@@ -358,9 +389,15 @@ public class Main {
         return options;
     }
 
+    private static void connectAndWait(MqttAsyncClient client, Config config, int maxInflight,
+                                       boolean cleanSession, String operation) throws MqttException {
+        IMqttToken token = client.connect(connectOptions(config, maxInflight, cleanSession));
+        waitForCompletion(token, CONTROL_COMPLETION_TIMEOUT_MS, operation);
+    }
+
     private static void subscribeAndWait(MqttAsyncClient client, String topic, int qos) throws MqttException {
         IMqttToken token = client.subscribe(topic, qos);
-        token.waitForCompletion();
+        waitForCompletion(token, CONTROL_COMPLETION_TIMEOUT_MS, "subscribe " + topic);
 
         int[] grantedQos = token.getGrantedQos();
         if (grantedQos == null || grantedQos.length == 0 || grantedQos[0] == 0x80) {
@@ -368,14 +405,46 @@ public class Main {
         }
     }
 
+    private static void waitForCompletion(IMqttToken token, long timeoutMs, String operation) throws MqttException {
+        token.waitForCompletion(timeoutMs);
+        if (!token.isComplete()) {
+            throw new MqttException(MqttException.REASON_CODE_CLIENT_TIMEOUT,
+                    new TimeoutException(operation + " timed out after " + timeoutMs + " ms"));
+        }
+    }
+
     private static void disconnectAndClose(MqttAsyncClient client) {
+        disconnectAndWait(client);
         try {
-            if (client.isConnected()) {
-                client.disconnect().waitForCompletion(5_000);
-            }
-            client.close();
+            client.close(true);
         } catch (MqttException e) {
             // best-effort cleanup
+        }
+    }
+
+    private static void disconnectAndWait(MqttAsyncClient client) {
+        try {
+            if (client.isConnected()) {
+                IMqttToken token = client.disconnect(DISCONNECT_QUIESCE_TIMEOUT_MS);
+                waitForCompletion(token, DISCONNECT_COMPLETION_TIMEOUT_MS, "disconnect");
+            }
+        } catch (MqttException e) {
+            try {
+                client.disconnectForcibly(DISCONNECT_QUIESCE_TIMEOUT_MS,
+                        DISCONNECT_COMPLETION_TIMEOUT_MS, true);
+            } catch (MqttException ignored) {
+                // best-effort cleanup
+            }
+        }
+    }
+
+    private static void forceOffline(MqttAsyncClient client) {
+        try {
+            if (client.isConnected()) {
+                client.disconnectForcibly(0, DISCONNECT_COMPLETION_TIMEOUT_MS, false);
+            }
+        } catch (MqttException e) {
+            // best-effort offline transition
         }
     }
 }
