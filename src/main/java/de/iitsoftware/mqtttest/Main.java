@@ -78,11 +78,12 @@ public class Main {
         }
     }
 
-    /** Run the full matrix: send-drain (QoS 1,2) then parallel (QoS 0,1,2), then print a table. */
+    /** Run the full matrix: send-drain then parallel, then print a table. */
     private void runAll(Config config) throws Exception {
         List<Result> results = new ArrayList<>();
 
-        for (int qos : new int[]{0, 1, 2}) {
+        int[] sendDrainQos = config.skipDrainQos0 ? new int[]{1, 2} : new int[]{0, 1, 2};
+        for (int qos : sendDrainQos) {
             banner("send-drain", qos);
             results.add(runSingle(config, Config.Mode.SEND_DRAIN, qos));
         }
@@ -122,7 +123,8 @@ public class Main {
             return t;
         });
 
-        subscriber.setCallback(receiveCallback(stats));
+        subscriber.setManualAcks(true);
+        subscriber.setCallback(receiveCallback(subscriber, stats));
         publisher.setCallback(publishCallback(inflight));
 
         try {
@@ -334,7 +336,7 @@ public class Main {
         System.out.println("  In-seq    : yes = every message arrived in ascending sequence; no(N) = N out-of-order arrivals.");
     }
 
-    private static MqttCallback receiveCallback(Stats stats) {
+    private static MqttCallback receiveCallback(MqttAsyncClient subscriber, Stats stats) {
         return new MqttCallback() {
             @Override
             public void connectionLost(Throwable cause) {
@@ -342,11 +344,12 @@ public class Main {
             }
 
             @Override
-            public void messageArrived(String topic, MqttMessage message) {
+            public void messageArrived(String topic, MqttMessage message) throws MqttException {
                 byte[] payload = message.getPayload();
                 ByteBuffer header = ByteBuffer.wrap(payload, 0, Config.HEADER_SIZE);
                 long seq = header.getLong();       // bytes 0..7
                 long sentNanos = header.getLong(); // bytes 8..15
+                subscriber.messageArrivedComplete(message.getId(), message.getQos());
                 stats.recordReceived(payload.length, seq, System.nanoTime() - sentNanos);
             }
 

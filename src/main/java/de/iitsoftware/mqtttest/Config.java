@@ -34,10 +34,12 @@ public final class Config {
     public final long throttleEvery;
     public final long throttleDelayMs;
     public final int receiveIdleTimeoutSeconds;
+    public final boolean skipDrainQos0;
 
     private Config(String broker, String topic, int qos, int size, long count,
                    int intervalSeconds, Mode mode, String username, String password, String clientPrefix,
-                   long throttleEvery, long throttleDelayMs, int receiveIdleTimeoutSeconds) {
+                   long throttleEvery, long throttleDelayMs, int receiveIdleTimeoutSeconds,
+                   boolean skipDrainQos0) {
         this.broker = broker;
         this.topic = topic;
         this.qos = qos;
@@ -51,12 +53,13 @@ public final class Config {
         this.throttleEvery = throttleEvery;
         this.throttleDelayMs = throttleDelayMs;
         this.receiveIdleTimeoutSeconds = receiveIdleTimeoutSeconds;
+        this.skipDrainQos0 = skipDrainQos0;
     }
 
     /** Create a copy with a different mode, QoS and topic (used by the {@code all} matrix runner). */
     public Config derive(Mode mode, int qos, String topic) {
         return new Config(broker, topic, qos, size, count, intervalSeconds, mode, username, password,
-                clientPrefix, throttleEvery, throttleDelayMs, receiveIdleTimeoutSeconds);
+                clientPrefix, throttleEvery, throttleDelayMs, receiveIdleTimeoutSeconds, skipDrainQos0);
     }
 
     public static String usage() {
@@ -81,6 +84,7 @@ public final class Config {
                   --throttle-delay MS sleep duration in milliseconds       (default 0)
                   --receive-idle-timeout SECS
                                        stop waiting after no receive progress (default auto)
+                  --skip-drain-qos0    skip send-drain QoS 0 in all/matrix mode
                   --username  USER   broker username              (optional)
                   --password  PASS   broker password              (optional)
                   --client    PREFIX client-id prefix             (default mqtt-perf)
@@ -94,7 +98,7 @@ public final class Config {
                               drain throughput separately. Requires QoS >= 1, and the broker must
                               be able to queue all N messages.
                   all         Run the full matrix and print a comparison table: send-drain at
-                              QoS 1 and 2, then parallel at QoS 0, 1 and 2.
+                              QoS 0, 1 and 2, then parallel at QoS 0, 1 and 2.
                 """;
     }
 
@@ -116,6 +120,7 @@ public final class Config {
         long throttleEvery = 0;
         long throttleDelayMs = 0;
         int receiveIdleTimeoutSeconds = 0;
+        boolean skipDrainQos0 = false;
 
         for (int i = 0; i < args.length; i++) {
             String arg = args[i];
@@ -131,6 +136,7 @@ public final class Config {
                 case "--throttle-every" -> throttleEvery = parseLong(value(args, ++i, arg), arg);
                 case "--throttle-delay" -> throttleDelayMs = parseLong(value(args, ++i, arg), arg);
                 case "--receive-idle-timeout" -> receiveIdleTimeoutSeconds = parseInt(value(args, ++i, arg), arg);
+                case "--skip-drain-qos0" -> skipDrainQos0 = true;
                 case "--username" -> username = value(args, ++i, arg);
                 case "--password" -> password = value(args, ++i, arg);
                 case "--client"   -> clientPrefix = value(args, ++i, arg);
@@ -171,7 +177,7 @@ public final class Config {
         }
 
         return new Config(broker, topic, qos, size, count, interval, mode, username, password, clientPrefix,
-                throttleEvery, throttleDelayMs, receiveIdleTimeoutSeconds);
+                throttleEvery, throttleDelayMs, receiveIdleTimeoutSeconds, skipDrainQos0);
     }
 
     private static Mode parseMode(String v) {
@@ -216,6 +222,7 @@ public final class Config {
                         + ", throttleDelay=" + throttleDelayMs + "ms" : "")
                 + (receiveIdleTimeoutSeconds > 0 ? ", receiveIdleTimeout="
                         + receiveIdleTimeoutSeconds + "s" : "")
+                + (skipDrainQos0 ? ", skipDrainQos0=true" : "")
                 + ", mode=" + switch (mode) {
                     case SEND_DRAIN -> "send-drain";
                     case PARALLEL -> "parallel";

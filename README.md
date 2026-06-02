@@ -38,6 +38,9 @@ java -jar target/mqtt_test-1.0-SNAPSHOT.jar --mode parallel --qos 1 --count 1000
 # Throttle publishing: sleep 50 ms after every 10,000 published messages
 java -jar target/mqtt_test-1.0-SNAPSHOT.jar --mode send-drain --qos 1 --throttle-every 10000 --throttle-delay 50
 
+# Full matrix, but omit send-drain QoS 0 because MQTT does not require offline QoS 0 queueing
+java -jar target/mqtt_test-1.0-SNAPSHOT.jar --mode all --skip-drain-qos0
+
 # Point at a remote broker
 java -jar target/mqtt_test-1.0-SNAPSHOT.jar --broker tcp://broker.example.com:1883
 ```
@@ -56,6 +59,7 @@ java -jar target/mqtt_test-1.0-SNAPSHOT.jar --broker tcp://broker.example.com:18
 | `--throttle-every` | N | `0` | Sleep after every N published messages (`0` disables throttling) |
 | `--throttle-delay` | ms | `0` | Sleep duration in milliseconds |
 | `--receive-idle-timeout` | seconds | auto | Stop waiting after no receive progress; auto is 10 s for QoS 0 and 300 s for QoS 1/2 |
+| `--skip-drain-qos0` | flag | false | In `all` mode, skip the send-drain QoS 0 test |
 | `--username` | user | — | Broker username (optional) |
 | `--password` | pass | — | Broker password (optional) |
 | `--client` | prefix | `mqtt-perf` | Client-id prefix |
@@ -136,7 +140,8 @@ caused by QoS 0 loss are not counted as reordering — they show up in the **Los
   publisher → broker → subscriber.
 - Publishing uses a bounded in-flight window (a semaphore released on `deliveryComplete`) so QoS 1/2
   pipelines without unbounded memory growth and applies natural backpressure.
-- The subscriber reads the payload header to count messages, detect loss, and compute latency.
+- The subscriber uses manual acknowledgements and only counts a message after asking Paho to complete
+  the inbound QoS acknowledgement step for that message.
 - A run completes when all N messages are received, or after an idle timeout following the last
   message. The automatic timeout is short for QoS 0 loss detection and longer for QoS 1/2, where a
   slow tail should not be reported as loss too early. Override with `--receive-idle-timeout`.
